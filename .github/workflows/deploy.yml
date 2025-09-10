@@ -70,8 +70,7 @@ jobs:
             aws lambda update-function-configuration \
               --function-name "${FUNCTION_NAME}" \
               --runtime "${RUNTIME}" \
-              --handler "${HANDLER}" \
-              --architectures "${ARCH}"
+              --handler "${HANDLER}"
           else
             echo "Creating Lambda ${FUNCTION_NAME}"
             aws lambda create-function \
@@ -79,8 +78,7 @@ jobs:
               --runtime "${RUNTIME}" \
               --handler "${HANDLER}" \
               --zip-file fileb://dist/function.zip \
-              --role "$ROLE_ARN" \
-              --architectures "${ARCH}"
+              --role "$ROLE_ARN"
           fi
 
           # Ensure the Function URL exists and is public
