@@ -22,7 +22,8 @@ jobs:
   deploy:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout
+        uses: actions/checkout@v4
 
       # Configure with IAM USER KEYS stored as repo secrets
       - name: Configure AWS credentials (user keys)
@@ -30,67 +31,105 @@ jobs:
         with:
           aws-access-key-id:     ${{ secrets.AWS_ACCESS_KEY_ID }}
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-          aws-session-token:     ${{ secrets.AWS_SESSION_TOKEN }} # omit if not using temp creds
           aws-region:            ${{ env.AWS_REGION }}
+          # Uncomment the next line ONLY if you actually set this secret and are using temporary creds
+          # aws-session-token:     ${{ secrets.AWS_SESSION_TOKEN }}
 
       - name: Zip function code
         run: |
           mkdir -p dist
-          (cd $GITHUB_WORKSPACE && zip -r dist/function.zip app)
+          zip -r dist/function.zip app
 
-      - name: Create/Update Lambda and Function URL
+      - name: Create or update Lambda and Function URL
         shell: bash
         run: |
-          set -e
+          set -euo pipefail
+
+          # Create or update the Lambda execution role
+          ROLE_NAME="${FUNCTION_NAME}-exec"
+          if ! aws iam get-role --role-name "$ROLE_NAME" >/dev/null 2>&1; then
+            aws iam create-role --role-name "$ROLE_NAME" \
+              --assume-role-policy-document '{
+                "Version":"2012-10-17",
+                "Statement":[{"Effect":"Allow","Principal":{"Service":"lambda.amazonaws.com"},"Action":"sts:AssumeRole"}]
+              }'
+            aws iam attach-role-policy --role-name "$ROLE_NAME" \
+              --policy-arn arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+            # Allow IAM to propagate
+            aws iam wait role-exists --role-name "$ROLE_NAME"
+            sleep 10
+          fi
+          ROLE_ARN=$(aws iam get-role --role-name "$ROLE_NAME" --query 'Role.Arn' --output text)
+
+          # Create or update the Lambda function
           if aws lambda get-function --function-name "${FUNCTION_NAME}" >/dev/null 2>&1; then
-            echo "Updating existing Lambda ${FUNCTION_NAME}"
-            aws lambda update-function-code --function-name "${FUNCTION_NAME}" --zip-file fileb://dist/function.zip >/dev/null
-            aws lambda update-function-configuration --function-name "${FUNCTION_NAME}" --runtime "${RUNTIME}" --handler "${HANDLER}" --architectures "${ARCH}" >/dev/null
+            echo "Updating Lambda ${FUNCTION_NAME}"
+            aws lambda update-function-code \
+              --function-name "${FUNCTION_NAME}" \
+              --zip-file fileb://dist/function.zip
+            aws lambda update-function-configuration \
+              --function-name "${FUNCTION_NAME}" \
+              --runtime "${RUNTIME}" \
+              --handler "${HANDLER}" \
+              --architectures "${ARCH}"
           else
             echo "Creating Lambda ${FUNCTION_NAME}"
-            ROLE_NAME="${FUNCTION_NAME}-exec"
-            if ! aws iam get-role --role-name "$ROLE_NAME" >/dev/null 2>&1; then
-              aws iam create-role --role-name "$ROLE_NAME"                 --assume-role-policy-document '{
-                  "Version":"2012-10-17",
-                  "Statement":[{"Effect":"Allow","Principal":{"Service":"lambda.amazonaws.com"},"Action":"sts:AssumeRole"}]
-                }' >/dev/null
-              aws iam attach-role-policy --role-name "$ROLE_NAME"                 --policy-arn arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
-              aws iam wait role-exists --role-name "$ROLE_NAME"
-              sleep 10
-            fi
-            ROLE_ARN=$(aws iam get-role --role-name "$ROLE_NAME" --query 'Role.Arn' --output text)
-            aws lambda create-function               --function-name "${FUNCTION_NAME}"               --runtime "${RUNTIME}"               --handler "${HANDLER}"               --zip-file fileb://dist/function.zip               --role "$ROLE_ARN"               --architectures "${ARCH}" >/dev/null
-
-            # Create public Function URL if not present
-            if ! aws lambda get-function-url-config --function-name "${FUNCTION_NAME}" >/dev/null 2>&1; then
-              URL=$(aws lambda create-function-url-config --function-name "${FUNCTION_NAME}" --auth-type NONE --query 'FunctionUrl' --output text)
-              aws lambda add-permission --function-name "${FUNCTION_NAME}" --statement-id AllowAll                 --action lambda:InvokeFunctionUrl --principal "*" --function-url-auth-type NONE >/dev/null
-              echo "FUNCTION_URL=$URL" >> $GITHUB_ENV
-            fi
+            aws lambda create-function \
+              --function-name "${FUNCTION_NAME}" \
+              --runtime "${RUNTIME}" \
+              --handler "${HANDLER}" \
+              --zip-file fileb://dist/function.zip \
+              --role "$ROLE_ARN" \
+              --architectures "${ARCH}"
           fi
 
-          # Always fetch URL
-          URL=$(aws lambda get-function-url-config --function-name "${FUNCTION_NAME}" --query 'FunctionUrl' --output text)
-          echo "FUNCTION_URL=$URL" >> $GITHUB_ENV
+          # Ensure the Function URL exists and is public
+          if ! aws lambda get-function-url-config --function-name "${FUNCTION_NAME}" >/dev/null 2>&1; then
+            URL=$(aws lambda create-function-url-config \
+              --function-name "${FUNCTION_NAME}" \
+              --auth-type NONE \
+              --query 'FunctionUrl' --output text)
+            aws lambda add-permission \
+              --function-name "${FUNCTION_NAME}" \
+              --statement-id AllowAllFunctionUrlInvoke \
+              --action lambda:InvokeFunctionUrl \
+              --principal "*" \
+              --function-url-auth-type NONE
+            echo "FUNCTION_URL=$URL" >> "$GITHUB_ENV"
+          fi
+
+          # Always fetch and export the URL
+          URL=$(aws lambda get-function-url-config \
+            --function-name "${FUNCTION_NAME}" \
+            --query 'FunctionUrl' --output text)
+          echo "FUNCTION_URL=$URL" >> "$GITHUB_ENV"
 
       - name: Output URL and test
         run: |
           echo "Function URL: $FUNCTION_URL"
           curl -sS "$FUNCTION_URL" | sed -e 's/^/  /'
 
-      # Optional: write demo metric and log (so CloudWatch MCP can query)
+      # Optional: write a CloudWatch custom metric for your MCP demo
       - name: Put demo metric
         run: |
           SHA="${{ github.sha }}"
-          aws cloudwatch put-metric-data             --namespace "Demo/Deployments"             --metric-name "DeploymentCount"             --value 1             --dimensions Repo=${{ github.repository }},Commit=$SHA,Env=${{ inputs.env }}
+          aws cloudwatch put-metric-data \
+            --namespace "Demo/Deployments" \
+            --metric-name "DeploymentCount" \
+            --value 1 \
+            --dimensions Repo=${{ github.repository }},Commit=$SHA,Env=${{ inputs.env }}
 
+      # Optional: write a CloudWatch log event for your MCP demo
       - name: Put a CloudWatch log line
         env:
           LG: "/aws/demo/deployments"
-          SHA: ${{ github.sha }}
+        shell: bash
         run: |
+          set -euo pipefail
+          SHA="${{ github.sha }}"
           TS=$(date +%s000)
           aws logs create-log-group --log-group-name "$LG" 2>/dev/null || true
           aws logs create-log-stream --log-group-name "$LG" --log-stream-name "$SHA" 2>/dev/null || true
-          printf '[{"timestamp": %s, "message": "Hello World deploy OK repo=%s sha=%s env=%s"}]
-' "$TS" "${{ github.repository }}" "$SHA" "${{ inputs.env }}"           | aws logs put-log-events --log-group-name "$LG" --log-stream-name "$SHA" --log-events file:///dev/stdin
+          printf '[{"timestamp": %s, "message": "Hello World deploy OK repo=%s sha=%s env=%s"}]\n' \
+            "$TS" "${{ github.repository }}" "$SHA" "${{ inputs.env }}" \
+          | aws logs put-log-events --log-group-name "$LG" --log-stream-name "$SHA" --log-events file:///dev/stdin
