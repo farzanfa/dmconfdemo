@@ -67,6 +67,8 @@ jobs:
             aws lambda update-function-code \
               --function-name "${FUNCTION_NAME}" \
               --zip-file fileb://dist/function.zip
+            # Wait until the function update is finished to avoid ResourceConflictException
+            aws lambda wait function-updated --function-name "${FUNCTION_NAME}"
             aws lambda update-function-configuration \
               --function-name "${FUNCTION_NAME}" \
               --runtime "${RUNTIME}" \
