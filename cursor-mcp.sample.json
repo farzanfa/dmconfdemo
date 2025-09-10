@@ -1,0 +1,19 @@
+{
+  "mcpServers": {
+    "github": {
+      "type": "http",
+      "url": "https://api.githubcopilot.com/mcp/",
+      "headers": { "Authorization": "Bearer ${env:GITHUB_PAT}" }
+    },
+    "awslabs.cloudwatch-mcp-server": {
+      "command": "uvx",
+      "args": ["awslabs.cloudwatch-mcp-server@latest"],
+      "env": {
+        "AWS_PROFILE": "demo",
+        "AWS_REGION": "us-east-1",
+        "AWS_SDK_LOAD_CONFIG": "1"
+      },
+      "transportType": "stdio"
+    }
+  }
+}
