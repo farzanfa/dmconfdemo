@@ -2,5 +2,5 @@ def lambda_handler(event, context):
     return {
         "statusCode": 200,
         "headers": {"Content-Type": "text/html"},
-        "body": "<h1>Hello from farzan</h1><p>This was deployed via GitHub Actions.</p>"
+        "body": "<h1>Hello from nubinix</h1><p>This was deployed via GitHub Actions.</p>"
     }
